@@ -85,9 +85,10 @@ def execute_db(query, args=()):
 # ─────────────────────────────────────────────
 
 def init_db():
-    """Create tables if they don't exist (idempotent)."""
+    """Create tables if they don't exist – each statement executed separately."""
     db = psycopg2.connect(DATABASE_URL)
     cur = db.cursor()
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id       SERIAL PRIMARY KEY,
@@ -95,8 +96,10 @@ def init_db():
             email    TEXT    NOT NULL UNIQUE,
             password TEXT    NOT NULL,
             role     TEXT    NOT NULL CHECK(role IN ('client','advocate'))
-        );
+        )
+    """)
 
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS advocates (
             user_id            INTEGER PRIMARY KEY REFERENCES users(id),
             court_level        TEXT DEFAULT '',
@@ -104,8 +107,10 @@ def init_db():
             fees               REAL DEFAULT 0,
             bio                TEXT DEFAULT '',
             meeting_time_slots TEXT DEFAULT ''
-        );
+        )
+    """)
 
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS appointments (
             id             SERIAL PRIMARY KEY,
             client_id      INTEGER REFERENCES users(id),
@@ -117,16 +122,19 @@ def init_db():
                                    CHECK(status IN ('Pending','Accepted','Rejected')),
             payment_status TEXT    NOT NULL DEFAULT 'Pending'
                                    CHECK(payment_status IN ('Pending','Paid'))
-        );
+        )
+    """)
 
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id               SERIAL PRIMARY KEY,
             appointment_id   INTEGER REFERENCES appointments(id),
             sender_id        INTEGER REFERENCES users(id),
             message_text     TEXT    NOT NULL,
             timestamp        TEXT    NOT NULL
-        );
+        )
     """)
+
     db.commit()
     cur.close()
     db.close()
@@ -582,9 +590,35 @@ def _startup():
         init_db()
         seed_advocate()
     except Exception as exc:
+        import traceback
         print(f"[ERROR] Startup failed: {exc}")
+        traceback.print_exc()
 
 _startup()
+
+
+# ─────────────────────────────────────────────
+# HEALTH / DEBUG ROUTE
+# ─────────────────────────────────────────────
+
+@app.route('/health')
+def health():
+    """Quick diagnostic endpoint — shows DB connection status."""
+    info = {'database_url_set': bool(DATABASE_URL), 'advocate_id': ADVOCATE_ID}
+    try:
+        db = psycopg2.connect(DATABASE_URL)
+        cur = db.cursor()
+        cur.execute("SELECT COUNT(*) FROM users")
+        info['users_count'] = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM advocates")
+        info['advocates_count'] = cur.fetchone()[0]
+        cur.close()
+        db.close()
+        info['db_status'] = 'OK'
+    except Exception as e:
+        info['db_status'] = f'ERROR: {e}'
+    return jsonify(info)
+
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
