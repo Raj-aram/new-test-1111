@@ -25,7 +25,7 @@ DATABASE_URL = os.environ.get('DATABASE_URL', '')
 # ─────────────────────────────────────────────
 ADVOCATE = {
     'name':        'Gaurav Raj Bhagat',
-    'email':       'gaurav@lexconnect.in',
+    'email':       'gaurav@adglegal.in',
     'designation': 'Advocate, Supreme Court of India',
     'location':    '123, Law Avenue, Delhi',
     'fees':        1500,

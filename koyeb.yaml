@@ -1,5 +1,5 @@
 services:
-  - name: lexconnect-web
+  - name: adg-legal-web
     type: web
     git:
       repository: github.com/Raj-aram/new-test-1111
