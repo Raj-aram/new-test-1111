@@ -6,9 +6,13 @@ import psycopg2
 import psycopg2.extras
 from flask import (Flask, render_template, request, redirect, url_for,
                    session, flash, jsonify, g)
+from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
+
+# Allow all origins – safe for local demo; tighten in production
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # Secret key – set SECRET_KEY env variable in production
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-only-change-in-production')
