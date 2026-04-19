@@ -36,17 +36,22 @@ ADVOCATE_ID = None
 
 
 # ─────────────────────────────────────────────
-# DATABASE HELPERS  (psycopg2 / PostgreSQL)
+# DATABASE HELPERS (PostgreSQL & SQLite Fallback)
 # ─────────────────────────────────────────────
 
 def get_db():
     db = getattr(g, '_database', None)
     if db is None:
-        db = g._database = psycopg2.connect(
-            DATABASE_URL,
-            cursor_factory=psycopg2.extras.RealDictCursor
-        )
-        db.autocommit = False
+        if DATABASE_URL:
+            db = g._database = psycopg2.connect(
+                DATABASE_URL,
+                cursor_factory=psycopg2.extras.RealDictCursor
+            )
+            db.autocommit = False
+        else:
+            import sqlite3
+            db = g._database = sqlite3.connect('legal.db')
+            db.row_factory = sqlite3.Row
     return db
 
 
@@ -57,10 +62,19 @@ def close_connection(exception):
         db.close()
 
 
+def format_query(query):
+    """Adapt PostgreSQL queries to SQLite if running locally."""
+    if not DATABASE_URL:
+        query = query.replace('%s', '?')
+        query = query.replace('SERIAL PRIMARY KEY', 'INTEGER PRIMARY KEY AUTOINCREMENT')
+    return query
+
+
 def query_db(query, args=(), one=False):
-    """Run a SELECT and return list of RealDictRow (or single row)."""
-    cur = get_db().cursor()
-    cur.execute(query, args)
+    """Run a SELECT and return list of dict-like rows (or single row)."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute(format_query(query), args)
     rv = cur.fetchall()
     cur.close()
     return (rv[0] if rv else None) if one else rv
@@ -70,14 +84,18 @@ def execute_db(query, args=()):
     """Run INSERT/UPDATE/DELETE, commit, and return lastrowid."""
     db = get_db()
     cur = db.cursor()
-    cur.execute(query, args)
+    cur.execute(format_query(query), args)
     db.commit()
+    
     # For INSERT … RETURNING id
-    try:
-        row = cur.fetchone()
-        return row['id'] if row else None
-    except Exception:
-        return None
+    if "RETURNING id" in query:
+        try:
+            row = cur.fetchone()
+            if row:
+                return row['id'] if isinstance(row, dict) else row[0]
+        except Exception:
+            pass
+    return cur.lastrowid if not DATABASE_URL else None
 
 
 # ─────────────────────────────────────────────
@@ -86,10 +104,15 @@ def execute_db(query, args=()):
 
 def init_db():
     """Create tables if they don't exist – each statement executed separately."""
-    db = psycopg2.connect(DATABASE_URL)
-    cur = db.cursor()
+    if DATABASE_URL:
+        db = psycopg2.connect(DATABASE_URL)
+        cur = db.cursor()
+    else:
+        import sqlite3
+        db = sqlite3.connect('legal.db')
+        cur = db.cursor()
 
-    cur.execute("""
+    cur.execute(format_query("""
         CREATE TABLE IF NOT EXISTS users (
             id       SERIAL PRIMARY KEY,
             name     TEXT    NOT NULL,
@@ -97,9 +120,9 @@ def init_db():
             password TEXT    NOT NULL,
             role     TEXT    NOT NULL CHECK(role IN ('client','advocate'))
         )
-    """)
+    """))
 
-    cur.execute("""
+    cur.execute(format_query("""
         CREATE TABLE IF NOT EXISTS advocates (
             user_id            INTEGER PRIMARY KEY REFERENCES users(id),
             court_level        TEXT DEFAULT '',
@@ -108,9 +131,9 @@ def init_db():
             bio                TEXT DEFAULT '',
             meeting_time_slots TEXT DEFAULT ''
         )
-    """)
+    """))
 
-    cur.execute("""
+    cur.execute(format_query("""
         CREATE TABLE IF NOT EXISTS appointments (
             id             SERIAL PRIMARY KEY,
             client_id      INTEGER REFERENCES users(id),
@@ -123,9 +146,9 @@ def init_db():
             payment_status TEXT    NOT NULL DEFAULT 'Pending'
                                    CHECK(payment_status IN ('Pending','Paid'))
         )
-    """)
+    """))
 
-    cur.execute("""
+    cur.execute(format_query("""
         CREATE TABLE IF NOT EXISTS messages (
             id               SERIAL PRIMARY KEY,
             appointment_id   INTEGER REFERENCES appointments(id),
@@ -133,7 +156,7 @@ def init_db():
             message_text     TEXT    NOT NULL,
             timestamp        TEXT    NOT NULL
         )
-    """)
+    """))
 
     db.commit()
     cur.close()
@@ -144,25 +167,34 @@ def init_db():
 def seed_advocate():
     """Ensure Gaurav Raj Bhagat exists in DB and cache ADVOCATE_ID."""
     global ADVOCATE_ID
-    db = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
-    cur = db.cursor()
+    if DATABASE_URL:
+        db = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+        cur = db.cursor()
+    else:
+        import sqlite3
+        db = sqlite3.connect('legal.db')
+        db.row_factory = sqlite3.Row
+        cur = db.cursor()
 
-    cur.execute('SELECT id FROM users WHERE email = %s', [ADVOCATE['email']])
+    cur.execute(format_query('SELECT id FROM users WHERE email = %s'), [ADVOCATE['email']])
     row = cur.fetchone()
 
     if row:
         uid = row['id']
     else:
         hashed = generate_password_hash('ChangeMe@123')
-        cur.execute(
-            'INSERT INTO users (name, email, password, role) VALUES (%s,%s,%s,%s) RETURNING id',
-            [ADVOCATE['name'], ADVOCATE['email'], hashed, 'advocate']
-        )
-        uid = cur.fetchone()['id']
-        cur.execute(
-            """INSERT INTO advocates
+        q = 'INSERT INTO users (name, email, password, role) VALUES (%s,%s,%s,%s) RETURNING id'
+        cur.execute(format_query(q), [ADVOCATE['name'], ADVOCATE['email'], hashed, 'advocate'])
+        
+        if DATABASE_URL:
+            uid = cur.fetchone()['id']
+        else:
+            uid = cur.lastrowid
+            
+        q2 = """INSERT INTO advocates
                (user_id, court_level, location, fees, bio, meeting_time_slots)
-               VALUES (%s,%s,%s,%s,%s,%s)""",
+               VALUES (%s,%s,%s,%s,%s,%s)"""
+        cur.execute(format_query(q2), 
             [uid, ADVOCATE['court_level'], ADVOCATE['location'],
              ADVOCATE['fees'], ADVOCATE['bio'], ADVOCATE['meeting_time_slots']]
         )
@@ -170,9 +202,9 @@ def seed_advocate():
         print(f"[OK] Advocate seeded with id={uid}")
 
     # Keep advocates row in sync with hardcoded data
-    cur.execute(
-        """UPDATE advocates SET court_level=%s, location=%s, fees=%s,
-           bio=%s, meeting_time_slots=%s WHERE user_id=%s""",
+    q3 = """UPDATE advocates SET court_level=%s, location=%s, fees=%s,
+           bio=%s, meeting_time_slots=%s WHERE user_id=%s"""
+    cur.execute(format_query(q3),
         [ADVOCATE['court_level'], ADVOCATE['location'], ADVOCATE['fees'],
          ADVOCATE['bio'], ADVOCATE['meeting_time_slots'], uid]
     )
@@ -584,8 +616,7 @@ def help_page():
 
 def _startup():
     if not DATABASE_URL:
-        print("[WARN] DATABASE_URL not set – skipping DB init.")
-        return
+        print("[INFO] DATABASE_URL not set – using local SQLite fallback for testing.")
     try:
         init_db()
         seed_advocate()
